@@ -36,10 +36,11 @@ jobs:
 
       - name: Upload Excel report
         if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: execution-report
-          path: reports/
+        name: test-reports
+        path: reports/
+        if-no-files-found: ignore  # warning nahi aayega
 
       - name: Upload screenshots (on failure)
         if: always()
