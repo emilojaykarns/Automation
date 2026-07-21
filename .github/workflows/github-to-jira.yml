@@ -2,7 +2,7 @@ name: GitHub Issue to Jira
 
 on:
   issues:
-    types: [opened]  # jab bhi naya issue open ho
+    types: [opened]
 
 jobs:
   create-jira-ticket:
@@ -12,42 +12,86 @@ jobs:
       - name: Extract Assignee from Issue Body
         id: extract
         run: |
-          # Issue body mein "Assignee: john.doe@company.com" format expect karo
           ASSIGNEE=$(echo "${{ github.event.issue.body }}" | grep -i "^Assignee:" | sed 's/Assignee://i' | xargs)
           echo "assignee=$ASSIGNEE" >> $GITHUB_OUTPUT
+          echo "Extracted assignee: $ASSIGNEE"
 
-      - name: Get Jira Account ID from Email
+      - name: Get Jira Account ID
         id: jira_user
         run: |
-          ACCOUNT_ID=$(curl -s \
+          RESPONSE=$(curl -s \
             -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/user/search?query=${{ steps.extract.outputs.assignee }}" \
-            | python3 -c "import sys,json; data=json.load(sys.stdin); print(data[0]['accountId'] if data else '')")
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/user/search?query=${{ steps.extract.outputs.assignee }}")
+          
+          echo "Jira user search response: $RESPONSE"
+          
+          ACCOUNT_ID=$(echo $RESPONSE | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data[0]['accountId'] if data else '')
+          ")
           echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+          echo "Account ID: $ACCOUNT_ID"
 
       - name: Create Jira Ticket
+        id: create_ticket
         run: |
-          curl -s -X POST \
+          SUMMARY=$(echo "${{ github.event.issue.title }}" | sed 's/"/\\"/g')
+          BODY=$(echo "${{ github.event.issue.body }}" | sed 's/"/\\"/g' | tr '\n' ' ')
+          ACCOUNT_ID="${{ steps.jira_user.outputs.account_id }}"
+
+          # Assignee field conditionally add karo
+          if [ -n "$ACCOUNT_ID" ]; then
+            ASSIGNEE_JSON=", \"assignee\": {\"accountId\": \"$ACCOUNT_ID\"}"
+          else
+            ASSIGNEE_JSON=""
+          fi
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "fields": {
+              "project": { "key": "${{ secrets.JIRA_PROJECT_KEY }}" },
+              "summary": "$SUMMARY",
+              "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [{
+                  "type": "paragraph",
+                  "content": [{
+                    "type": "text",
+                    "text": "$BODY GitHub Issue: ${{ github.event.issue.html_url }}"
+                  }]
+                }]
+              },
+              "issuetype": { "name": "Bug" }
+              $ASSIGNEE_JSON
+            }
+          }
+          EOF
+          )
+
+          RESPONSE=$(curl -s -X POST \
             -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            --data '{
-              "fields": {
-                "project": { "key": "${{ secrets.JIRA_PROJECT_KEY }}" },
-                "summary": "${{ github.event.issue.title }}",
-                "description": {
-                  "type": "doc",
-                  "version": 1,
-                  "content": [{
-                    "type": "paragraph",
-                    "content": [{
-                      "type": "text",
-                      "text": "${{ github.event.issue.body }}\n\nGitHub Issue: ${{ github.event.issue.html_url }}"
-                    }]
-                  }]
-                },
-                "issuetype": { "name": "Bug" },
-                "assignee": { "accountId": "${{ steps.jira_user.outputs.account_id }}" }
-              }
-            }' \
-            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue"
+            --data "$PAYLOAD" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue")
+
+          echo "Jira response: $RESPONSE"
+
+          TICKET_KEY=$(echo $RESPONSE | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('key', 'ERROR'))
+          ")
+          echo "ticket_key=$TICKET_KEY" >> $GITHUB_OUTPUT
+          echo "Created ticket: $TICKET_KEY"
+
+      - name: Comment Jira Link on GitHub Issue
+        if: steps.create_ticket.outputs.ticket_key != 'ERROR'
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "{\"body\": \"✅ Jira ticket created: ${{ secrets.JIRA_BASE_URL }}/browse/${{ steps.create_ticket.outputs.ticket_key }}\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments"
