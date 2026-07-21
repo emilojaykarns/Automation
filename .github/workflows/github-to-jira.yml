@@ -1,0 +1,53 @@
+name: GitHub Issue to Jira
+
+on:
+  issues:
+    types: [opened]  # jab bhi naya issue open ho
+
+jobs:
+  create-jira-ticket:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Extract Assignee from Issue Body
+        id: extract
+        run: |
+          # Issue body mein "Assignee: john.doe@company.com" format expect karo
+          ASSIGNEE=$(echo "${{ github.event.issue.body }}" | grep -i "^Assignee:" | sed 's/Assignee://i' | xargs)
+          echo "assignee=$ASSIGNEE" >> $GITHUB_OUTPUT
+
+      - name: Get Jira Account ID from Email
+        id: jira_user
+        run: |
+          ACCOUNT_ID=$(curl -s \
+            -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/user/search?query=${{ steps.extract.outputs.assignee }}" \
+            | python3 -c "import sys,json; data=json.load(sys.stdin); print(data[0]['accountId'] if data else '')")
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Create Jira Ticket
+        run: |
+          curl -s -X POST \
+            -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data '{
+              "fields": {
+                "project": { "key": "${{ secrets.JIRA_PROJECT_KEY }}" },
+                "summary": "${{ github.event.issue.title }}",
+                "description": {
+                  "type": "doc",
+                  "version": 1,
+                  "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                      "type": "text",
+                      "text": "${{ github.event.issue.body }}\n\nGitHub Issue: ${{ github.event.issue.html_url }}"
+                    }]
+                  }]
+                },
+                "issuetype": { "name": "Bug" },
+                "assignee": { "accountId": "${{ steps.jira_user.outputs.account_id }}" }
+              }
+            }' \
+            "${{ secrets.JIRA_BASE_URL }}/rest/api/3/issue"
