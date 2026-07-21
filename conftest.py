@@ -1,26 +1,47 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import pytest
+import requests
+import os
+from utils.driver_factory import build_driver
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPOSITORY")  # "emilojaykarns/Automation"
+ASSIGNEE_EMAIL = os.getenv("JIRA_ASSIGNEE_EMAIL", "emilojaykarns@emilo.in")
+
+
+def create_github_issue(title, body):
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/issues"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "title": title,
+        "body": body
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    print(f"GitHub Issue created: {response.json().get('html_url')}")
+
 
 @pytest.fixture
 def driver():
-    options = webdriver.ChromeOptions()
+    drv = build_driver()
+    yield drv
+    drv.quit()
 
-    # Start browser maximized
-    options.add_argument("--start-maximized")
 
-    # Uncomment if you want the browser to stay open after the script ends
-    options.add_experimental_option("detach", True)
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+    # Sirf FAIL pe aur sirf call phase mein
+    if report.when == "call" and report.failed:
+        test_name = item.name
+        error_msg = str(report.longrepr)
 
-    driver.implicitly_wait(10)
+        issue_title = f"🐛 Test Failed: {test_name}"
+        issue_body = f"""## Automated Bug Report
 
-    yield driver
+**Test Name:** `{test_name}`
 
-    # Close browser after test
-    driver.quit()
+## Error Details
